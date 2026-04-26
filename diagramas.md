@@ -28,8 +28,6 @@ flowchart LR
         OP3[Worker op3]
     end
 
-    MON[Monitor]
-
     C1 -- "PUB req.quadratic" --> BP
     C1 -- "PUB req.quadratic" --> BB
     C2 -- "PUB req.quadratic" --> BP
@@ -49,13 +47,10 @@ flowchart LR
     BB <-- "..." --> OP2
     BP <-- "..." --> OP3
     BB <-- "..." --> OP3
-
-    BP -- "SUB *" --> MON
-    BB -- "SUB *" --> MON
 ```
 
 **Notas:**
-- Cada componente (cliente, coordinador, worker, monitor) abre **un solo socket
+- Cada componente (cliente, coordinador, workers) abre **un solo socket
   PUB y un solo socket SUB** que hacen `connect` a **los dos brokers a la vez**.
 - ZMQ permite multi-connect: si uno de los dos brokers cae, el socket sigue
   entregando por el otro de forma transparente.

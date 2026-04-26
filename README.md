@@ -28,10 +28,17 @@ Los **dos brokers** se ubican en las máquinas con menos carga de cálculo:
 | Broker PRIMARIO | David (Coordinador) | 10.43.97.251   | XSUB 5559 / XPUB 5560 |
 | Broker BACKUP   | Carol (Cliente)     | 10.43.100.92   | XSUB 5561 / XPUB 5562 |
 
-> Cada componente (cliente, coordinador, workers, monitor) **se conecta
-> a los dos brokers en paralelo**. Si uno cae, el otro mantiene el
-> sistema funcionando. Los receptores deduplican por `msg_id` para
-> no procesar el mismo mensaje dos veces.
+> Cada componente (cliente, coordinador, workers) **se conecta a los dos
+> brokers en paralelo**. Si uno cae, el otro mantiene el sistema
+> funcionando. Los receptores deduplican por `msg_id` para no procesar
+> el mismo mensaje dos veces.
+>
+> **Cada terminal muestra lo suyo en vivo**: el broker imprime cada
+> suscripción y mensaje que pasa por él, el coordinador imprime cada
+> solicitud, etapa, decisión de failover y respuesta, los workers
+> imprimen cada tarea recibida con todos los pasos del cálculo, y el
+> cliente solo muestra `>>> Solicitud` y `<<< Respuesta` (no se entera
+> de nada interno).
 
 ---
 
@@ -154,26 +161,62 @@ Salida del cliente (lo único que ve el usuario final):
 > caído, modo de respuesta, traza, reintentos…). Toda esa información
 > aparece en las terminales del coordinador y los workers.
 
-### Paso 6 (opcional) — Monitor del bus
+---
 
-Para sustentar visualmente la actividad del bus pub/sub, en cualquier
-máquina (con la dependencia ya instalada):
+## 3. Qué se ve en cada terminal durante una solicitud
 
-```bash
-python3 monitor.py
+Cuando Carol corre `python3 client.py 1 -3 2`, esto sucede en tiempo real:
+
+**Terminal del Cliente (Carol)** — solo solicitud y respuesta:
+```
+>>> Solicitud: resolver  1.0x^2 + (-3.0)x + 2.0 = 0
+<<< Respuesta:
+      x1 = 2.0
+      x2 = 1.0
 ```
 
-Imprime CADA mensaje que pasa por los topicos del sistema, etiquetado:
+**Terminal del Broker primario (David)** — ve cada suscripción y mensaje:
 ```
-[MONITOR] [req-cliente]   req.quadratic  {'request_id': '...', 'a': 1.0, ...}
-[MONITOR] [task->worker]  task.op1       {'a': 1.0, 'b': -3.0, ...}
-[MONITOR] [result->coord] result.<id>    {'sqrt_d': 1.0, ...}
-[MONITOR] [resp->cliente] response.<id>  {'x1': 2.0, 'x2': 1.0, ...}
+[BROKER:primary] +SUB    topic='response.client-abc123'   (suscriptores = 1)
+[BROKER:primary] PUB->SUB  topic='req.quadratic'  (msg #16)
+[BROKER:primary] PUB->SUB  topic='task.op1'  (msg #17)
+[BROKER:primary] PUB->SUB  topic='result.<id>'  (msg #18)
+...
+[BROKER:primary] PUB->SUB  topic='response.client-abc123'  (msg #23)
 ```
+
+**Terminal del Coordinador (David)** — ve la solicitud, cada etapa, cada decisión y la respuesta:
+```
+[COORD] +++ NUEVA SOLICITUD recibida en topic='req.quadratic' client=client-abc123
+[COORD] ** procesando solicitud req=...  a=1.0 b=-3.0 c=2.0
+[COORD]    estado inicial: vivos=['op1', 'op2', 'op3']  caidos=[]
+[COORD] == Etapa 'sqrt_discriminant'  plan = ['op1', 'op2', 'op3']
+[COORD]    --> publicando tarea en topic='task.op1' (sqrt_discriminant -> op1)
+[COORD] <<< resultado recibido worker=op1 stage=sqrt_discriminant ok=True
+[COORD]    OK: op1 respondio
+[COORD] == Etapa 'numerator' ...
+[COORD] == Etapa 'division' ...
+[COORD] >>> RESPUESTA publicada en topic='response.client-abc123'
+```
+
+**Terminal del Worker (ej. Valeria, op1)** — ve cada tarea y su cálculo:
+```
+[OP1] >>> TAREA #1 recibida en topic='task.op1'
+[OP1]     request_id = ...
+[OP1]     stage      = sqrt_discriminant
+[OP1]     datos      = {'a': 1.0, 'b': -3.0, 'c': 2.0}
+[OP1] calculando discriminante: -3.0^2 - 4*1.0*2.0
+[OP1]   disc = 1.0
+[OP1]   sqrt_d = 1.0
+[OP1] <<< RESULTADO publicado en topic='result.<id>' (ok=True)
+```
+
+(Y los workers que no participan en esta solicitud — op2, op3 — solo ven
+sus latidos y la tarea que les toca a cada uno).
 
 ---
 
-## 3. Pruebas para la sustentación
+## 4. Pruebas para la sustentación
 
 | Escenario                       | Cómo provocarlo                                  | Qué se debe ver                                                                       |
 | ------------------------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------- |
@@ -184,11 +227,11 @@ Imprime CADA mensaje que pasa por los topicos del sistema, etiquetado:
 | Cae broker primario             | `Ctrl+C` en `broker.py primary`                  | Cliente: respuestas siguen llegando vía backup. Coordinador y workers siguen logueando |
 | Vuelve broker primario          | `python3 broker.py primary` otra vez             | ZMQ reconecta automáticamente (ver logs `+SUB` en el primario nuevo)                   |
 | Cliente nuevo                   | `python3 client.py --id otro 4 -4 1`             | El cliente nuevo recibe su respuesta sin que nadie reconfigure nada                    |
-| Worker nuevo en caliente        | `python3 worker.py op4` en cualquier máquina     | El monitor ve sus heartbeats; para que el coordinador lo use hay que añadirlo a `config.ROLE_PLAN` |
+| Worker nuevo en caliente        | `python3 worker.py op4` en cualquier máquina     | El coordinador detecta su heartbeat (log `transicion: op4 ahora esta VIVO`); para que lo use en el pipeline hay que añadirlo a `config.ROLE_PLAN` |
 
 ---
 
-## 4. Estructura de tópicos
+## 5. Estructura de tópicos
 
 | Tópico                        | Dirección                | Contenido                                |
 | ----------------------------- | ------------------------ | ---------------------------------------- |
@@ -201,7 +244,7 @@ Imprime CADA mensaje que pasa por los topicos del sistema, etiquetado:
 
 ---
 
-## 5. Componentes / archivos
+## 6. Componentes / archivos
 
 | Archivo          | Rol                                                              |
 | ---------------- | ---------------------------------------------------------------- |
@@ -209,7 +252,6 @@ Imprime CADA mensaje que pasa por los topicos del sistema, etiquetado:
 | `coordinator.py` | Orquestador del pipeline (failover por roles + single_node)      |
 | `worker.py`      | Worker (op1/op2/op3/...): ejecuta una etapa o el cálculo full    |
 | `client.py`      | CLI minimalista — solo solicitud y respuesta                     |
-| `monitor.py`     | Suscriptor a todos los tópicos (visualización en vivo)           |
 | `messaging.py`   | Helpers `Publisher`/`Subscriber` con dual-broker + dedupe        |
 | `log.py`         | Helper de logging con timestamp                                   |
 | `config.py`      | IPs, puertos, tópicos, role-plan, timeouts                       |
