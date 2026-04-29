@@ -71,6 +71,9 @@ def _unregister_request(request_id):
 # ---------------------------------------------------------------------------
 # Listener unico (heartbeats + resultados)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Listener unico (heartbeats + resultados)
+# ---------------------------------------------------------------------------
 
 def _bus_listener():
     sub = Subscriber([
@@ -91,16 +94,30 @@ def _bus_listener():
                     _last_hb[worker_id] = time.time()
             continue
         if topic.startswith(config.TOPIC_RESULT_PREFIX):
-            req_id = payload.get("request_id")
-            log(f"<<< resultado recibido en topic='{topic}' worker={payload.get('worker')} "
-                f"stage={payload.get('stage')} ok={payload.get('ok')}", COMP)
+            req_id   = payload.get("request_id")
+            worker   = payload.get("worker")
+            stage    = payload.get("stage")
+            ok       = payload.get("ok")
+
+            # --- campos de datos segun la etapa ---
+            data_fields = {k: v for k, v in payload.items()
+                           if k not in {"request_id", "worker", "stage", "ok", "error"}}
+
+            log(f"<<< RESULTADO recibido"
+                f"\n    topic   : {topic}"
+                f"\n    worker  : {worker}"
+                f"\n    stage   : {stage}"
+                f"\n    ok      : {ok}"
+                + (f"\n    error   : {payload.get('error')}" if not ok else "")
+                + (f"\n    datos   : {data_fields}"          if data_fields else ""),
+                COMP)
+
             with _rq_lock:
                 q = _result_queues.get(req_id)
             if q is not None:
                 q.put(payload)
             else:
                 log(f"    (resultado para req={req_id} sin handler activo, descartado)", COMP)
-
 
 def _alive_watchdog():
     """Vigila los heartbeats y loguea transiciones VIVO <-> CAIDO."""
@@ -134,6 +151,8 @@ def _wait_result(q, expected_worker, timeout):
         if expected_worker is None or payload.get("worker") == expected_worker:
             return payload
         # Resultado rezagado de otro worker: lo ignoramos y seguimos esperando.
+        log(f"   (descartando resultado rezagado de worker='{payload.get('worker')}'"
+            f", esperando '{expected_worker}')", COMP)
     return None
 
 
@@ -160,11 +179,19 @@ def _run_stage(pub, q, request_id, stage, payload, dead_ops):
                 f"resultado) -> dead_ops", COMP)
             dead_ops.add(op_name)
             continue
-        log(f"   OK: {op_name} respondio (ok={result.get('ok')})", COMP)
+
+        # --- imprimir lo que devolvio este operador ---
+        data_fields = {k: v for k, v in result.items()
+                       if k not in {"request_id", "worker", "stage", "ok", "error"}}
+        log(f"   OK: {op_name} respondio"
+            f"\n      ok    : {result.get('ok')}"
+            + (f"\n      error : {result.get('error')}" if not result.get("ok") else "")
+            + (f"\n      datos : {data_fields}"         if data_fields else ""),
+            COMP)
         return result, op_name
+
     log(f"   AGOTADO: ningun candidato respondio para '{stage}'", COMP)
     return None, None
-
 
 def _try_full_quadratic(pub, q, request_id, a, b, c, dead_ops):
     alive = _alive_ops_now(dead_ops)
